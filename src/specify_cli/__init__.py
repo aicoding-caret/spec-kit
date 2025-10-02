@@ -66,6 +66,7 @@ def _github_auth_headers(cli_token: str | None = None) -> dict:
 
 # Constants
 AI_CHOICES = {
+    "cline": "Caret/Cline (compatible)",
     "copilot": "GitHub Copilot",
     "claude": "Claude Code",
     "gemini": "Gemini CLI",
@@ -77,6 +78,11 @@ AI_CHOICES = {
     "kilocode": "Kilo Code",
     "auggie": "Auggie CLI",
     "roo": "Roo Code",
+}
+COMPATIBLE_CHOICES = {
+    "cline": "Cline (.clinerules)",
+    "caret": "Caret (.caretrules)",
+    "compatible": "Caret Compatible (custom brand)",
 }
 # Add script type choices
 SCRIPT_TYPE_CHOICES = {"sh": "POSIX Shell (bash/zsh)", "ps": "PowerShell"}
@@ -434,10 +440,61 @@ def init_git_repo(project_path: Path, quiet: bool = False) -> bool:
 
 
 def download_template_from_github(ai_assistant: str, download_dir: Path, *, script_type: str = "sh", verbose: bool = True, show_progress: bool = True, client: httpx.Client = None, debug: bool = False, github_token: str = None) -> Tuple[Path, dict]:
-    repo_owner = "github"
-    repo_name = "spec-kit"
     if client is None:
         client = httpx.Client(verify=ssl_context)
+
+    # CARET MODIFICATION: Direct download from pre-packaged release
+    if ai_assistant == "cline":
+        repo_owner = "aicoding-caret"
+        repo_name = "spec-kit"
+
+        # Direct URL to pre-packaged zip file in release directory
+        template_url = f"https://raw.githubusercontent.com/{repo_owner}/{repo_name}/main/release/spec-kit-template-cline.zip"
+
+        if verbose:
+            console.print(f"[cyan]Downloading cline template: {template_url}[/cyan]")
+
+        final_zip_name = f"spec-kit-template-cline-{script_type}.zip"
+        final_zip_path = download_dir / final_zip_name
+
+        try:
+            with client.stream("GET", template_url, timeout=60, follow_redirects=True, headers=_github_auth_headers(github_token)) as response:
+                response.raise_for_status()
+                with open(final_zip_path, 'wb') as f:
+                    total_size = int(response.headers.get('content-length', 0))
+                    if show_progress and total_size > 0:
+                        with Progress(
+                            SpinnerColumn(),
+                            TextColumn("[progress.description]{task.description}"),
+                            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                            console=console,
+                        ) as progress:
+                            task = progress.add_task("Downloading template...", total=total_size)
+                            for chunk in response.iter_bytes(chunk_size=8192):
+                                f.write(chunk)
+                                progress.update(task, advance=len(chunk))
+                    else:
+                        for chunk in response.iter_bytes(chunk_size=8192):
+                            f.write(chunk)
+
+            if verbose:
+                console.print(f"Downloaded template: {final_zip_path}")
+
+            metadata = {
+                "filename": final_zip_name,
+                "size": final_zip_path.stat().st_size,
+                "release": f"{repo_owner}/{repo_name}@main",
+                "asset_url": template_url
+            }
+            return final_zip_path, metadata
+        except Exception as e:
+            console.print(f"[red]Error downloading template from release[/red]")
+            console.print(Panel(str(e), title="Template Download Error", border_style="red"))
+            raise typer.Exit(1)
+
+    # Original logic for other AIs
+    repo_owner = "github"
+    repo_name = "spec-kit"
     
     if verbose:
         console.print("[cyan]Fetching latest release information...[/cyan]")
@@ -877,6 +934,22 @@ def init(
             "Choose your AI assistant:", 
             "copilot"
         )
+
+    # CARET MODIFICATION: Rule type selection for Caret/Cline
+    selected_rule_type = None
+    if selected_ai == "cline":
+        selected_rule_type = select_with_arrows(
+            COMPATIBLE_CHOICES,
+            "Choose your agent type:",
+            "cline"
+        )
+        if selected_rule_type == "compatible":
+            brand_name = typer.prompt("Enter brand name for rules directory")
+            final_rule_dir = f".{brand_name}rules"
+        elif selected_rule_type == "caret":
+            final_rule_dir = ".caretrules"
+        else:
+            final_rule_dir = ".clinerules"
     
     # Check agent tools unless ignored
     if not ignore_agent_tools:
@@ -978,6 +1051,16 @@ def init(
 
             # Ensure scripts are executable (POSIX)
             ensure_executable_scripts(project_path, tracker=tracker)
+
+            # CARET MODIFICATION: Rename rules directory
+            if selected_ai == "cline" and selected_rule_type:
+                placeholder_dir = project_path / "__rules__"
+                if placeholder_dir.exists():
+                    final_dir_path = project_path / final_rule_dir
+                    os.rename(placeholder_dir, final_dir_path)
+                    tracker.add("rename-rules", "Configure rule directory")
+                    tracker.complete("rename-rules", f"Renamed to {final_rule_dir}")
+
 
             # Git step
             if not no_git:
