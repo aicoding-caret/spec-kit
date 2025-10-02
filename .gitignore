@@ -41,5 +41,4 @@ env/
 
 # Spec Kit-specific files
 .genreleases/
-*.zip
 sdd-*/
